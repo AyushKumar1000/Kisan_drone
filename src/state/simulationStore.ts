@@ -15,41 +15,67 @@ import {
   calculateNozzleFlow, shouldTriggerRTB, isGPSValid, canSpray,
   generateId, clamp, calculateRTBThreshold, remainingRouteDistance,
   calculateRiskExposure, shrinkPolygon, routeDistance, getCentroid,
+  generateAdaptiveSprayRoute, calculatePolygonArea, formatArea,
 } from '../utils/calculations';
 
-// ─── Default field boundary (a farm field polygon, 600x400 area) ───
-const DEFAULT_BOUNDARY: Position[] = [
-  { x: 50, y: 50 },
-  { x: 550, y: 50 },
-  { x: 550, y: 350 },
-  { x: 50, y: 350 },
-];
+// ─── Default field boundary presets (farm polygons within 620x420 canvas) ───
+export const FIELD_PRESETS: Record<string, { name: string; desc: string; points: Position[]; home: Position }> = {
+  SUGARCANE_ALPHA: {
+    name: 'Sugarcane Plot Alpha (Rectangular)',
+    desc: 'Standard commercial plot bordered by irrigation canals (500m × 300m)',
+    points: [
+      { x: 50, y: 50 },
+      { x: 550, y: 50 },
+      { x: 550, y: 350 },
+      { x: 50, y: 350 },
+    ],
+    home: { x: 80, y: 80 },
+  },
+  L_SHAPED_FARM: {
+    name: 'L-Shaped Sugarcane Plantation',
+    desc: 'Avoids upper-right Organic Farm buffer zone completely',
+    points: [
+      { x: 50, y: 50 },
+      { x: 320, y: 50 },
+      { x: 320, y: 190 },
+      { x: 550, y: 190 },
+      { x: 550, y: 370 },
+      { x: 50, y: 370 },
+    ],
+    home: { x: 80, y: 80 },
+  },
+  TERRACE_POLYGON: {
+    name: 'Irregular Terrace Field (6-Sided)',
+    desc: 'Contoured field boundary tracing natural hill slopes',
+    points: [
+      { x: 120, y: 50 },
+      { x: 480, y: 60 },
+      { x: 570, y: 220 },
+      { x: 470, y: 360 },
+      { x: 100, y: 340 },
+      { x: 40, y: 180 },
+    ],
+    home: { x: 140, y: 100 },
+  },
+  ORGANIC_NEIGHBOUR_BUFFER: {
+    name: 'Plot Near Sensitive Organic Farm',
+    desc: 'High-risk parcel with strict non-spray buffer along northern border',
+    points: [
+      { x: 60, y: 120 },
+      { x: 540, y: 80 },
+      { x: 560, y: 360 },
+      { x: 70, y: 350 },
+    ],
+    home: { x: 90, y: 150 },
+  },
+};
 
-const DEFAULT_HOME: Position = { x: 80, y: 80 };
+const DEFAULT_BOUNDARY = FIELD_PRESETS.SUGARCANE_ALPHA.points;
+const DEFAULT_HOME = FIELD_PRESETS.SUGARCANE_ALPHA.home;
 
-// Generate a serpentine spray route inside the field
+// Generate a serpentine spray route inside the field using adaptive scanlines
 function generateSprayRoute(boundary: Position[], margin: number, home: Position): Position[] {
-  const inner = shrinkPolygon(boundary, margin + 20);
-  const minX = Math.min(...inner.map(p => p.x));
-  const maxX = Math.max(...inner.map(p => p.x));
-  const minY = Math.min(...inner.map(p => p.y));
-  const maxY = Math.max(...inner.map(p => p.y));
-  const spacing = 40;
-  const waypoints: Position[] = [home];
-  let goingRight = true;
-
-  for (let y = minY + 10; y < maxY - 10; y += spacing) {
-    if (goingRight) {
-      waypoints.push({ x: minX + 10, y });
-      waypoints.push({ x: maxX - 10, y });
-    } else {
-      waypoints.push({ x: maxX - 10, y });
-      waypoints.push({ x: minX + 10, y });
-    }
-    goingRight = !goingRight;
-  }
-  waypoints.push(home); // Return to home at end
-  return waypoints;
+  return generateAdaptiveSprayRoute(boundary, margin, home);
 }
 
 const defaultRoute = generateSprayRoute(DEFAULT_BOUNDARY, 30, DEFAULT_HOME);
@@ -157,6 +183,8 @@ interface SimulationStore extends SimulationState {
   setDronePosition: (pos: Position) => void;
   setBatteryDrainRate: (rate: number) => void;
   setGPSValid: (valid: boolean) => void;
+  setCustomBoundary: (points: Position[], customHome?: Position) => void;
+  applyFieldPreset: (presetKey: string) => void;
 }
 
 // ─── Load persisted settings ───
@@ -1015,6 +1043,69 @@ export const useSimulationStore = create<SimulationStore>((set, get) => {
     setGPSValid: (valid: boolean) => set(s => ({
       drone: { ...s.drone, gps: { ...s.drone.gps, valid } },
     })),
+
+    setCustomBoundary: (points: Position[], customHome?: Position) => set(s => {
+      if (points.length < 3) return {};
+
+      const settings = { ...s.settings, fieldBoundary: points };
+      persistSettings(settings);
+
+      // Determine home position (use provided, or compute safe offset from first vertex towards centroid)
+      let home = customHome;
+      if (!home) {
+        const centroid = getCentroid(points);
+        const p0 = points[0];
+        const d = distance(p0, centroid);
+        const ratio = d > 0 ? Math.min(0.4, 40 / d) : 0.2;
+        home = {
+          x: Math.round(p0.x + (centroid.x - p0.x) * ratio),
+          y: Math.round(p0.y + (centroid.y - p0.y) * ratio),
+        };
+      }
+
+      const routePoints = generateAdaptiveSprayRoute(points, settings.safetyMargin, home);
+      const fieldBoundary = { points, safetyMargin: settings.safetyMargin };
+      const route = {
+        waypoints: routePoints.map((p, i) => ({
+          id: `wp-${i}`,
+          position: p,
+          type: i === 0 ? 'HOME' as const : i === 1 ? 'SPRAY_START' as const : 'WAYPOINT' as const,
+        })),
+        totalDistance: routeDistance(routePoints),
+      };
+
+      const drone = {
+        ...s.drone,
+        homePosition: { ...home },
+        position: s.drone.missionActive ? s.drone.position : { ...home },
+        currentWaypointIndex: 0,
+      };
+
+      const areaInfo = formatArea(calculatePolygonArea(points));
+
+      return {
+        settings,
+        fieldBoundary,
+        route,
+        drone,
+        events: [
+          ...s.events,
+          createEvent(
+            'SAFETY',
+            'INFO',
+            `Farmer traced new field boundary (${points.length} vertices, area ${areaInfo.acres} / ${areaInfo.hectares}). Geofence & adaptive spray route updated.`,
+            'CUSTOM_BOUNDARY_SET',
+            drone.flightState
+          ),
+        ],
+      };
+    }),
+
+    applyFieldPreset: (presetKey: string) => {
+      const preset = FIELD_PRESETS[presetKey];
+      if (!preset) return;
+      get().setCustomBoundary(preset.points, preset.home);
+    },
   };
 });
 

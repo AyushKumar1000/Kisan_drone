@@ -3,6 +3,7 @@
 // ============================================================
 
 import { Position, FieldBoundary } from '../types/simulation';
+export type { Position, FieldBoundary };
 
 /** Euclidean distance between two points */
 export function distance(a: Position, b: Position): number {
@@ -82,9 +83,80 @@ export function shrinkPolygon(polygon: Position[], margin: number): Position[] {
 
 /** Get centroid of a polygon */
 export function getCentroid(polygon: Position[]): Position {
+  if (polygon.length === 0) return { x: 0, y: 0 };
   const n = polygon.length;
   const sum = polygon.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
   return { x: sum.x / n, y: sum.y / n };
+}
+
+/** Calculate polygon area using Shoelace formula (in square meters / pixels) */
+export function calculatePolygonArea(polygon: Position[]): number {
+  if (polygon.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const j = (i + 1) % polygon.length;
+    area += polygon[i].x * polygon[j].y;
+    area -= polygon[j].x * polygon[i].y;
+  }
+  return Math.abs(area) / 2;
+}
+
+/** Format area in Acres and Hectares */
+export function formatArea(sqMeters: number): { acres: string; hectares: string; sqM: string } {
+  // Assuming 1 unit = 1 meter
+  const acres = (sqMeters * 0.000247105).toFixed(2);
+  const hectares = (sqMeters * 0.0001).toFixed(2);
+  return {
+    acres: `${acres} Acres`,
+    hectares: `${hectares} Ha`,
+    sqM: `${Math.round(sqMeters)} m²`,
+  };
+}
+
+/** Generate a serpentine spray route adapted to any arbitrary traced polygon */
+export function generateAdaptiveSprayRoute(boundary: Position[], margin: number, home: Position): Position[] {
+  if (boundary.length < 3) return [home];
+  
+  const inner = shrinkPolygon(boundary, margin + 15);
+  const minY = Math.min(...inner.map(p => p.y));
+  const maxY = Math.max(...inner.map(p => p.y));
+  const spacing = 35; // Spacing between spray swaths (in meters)
+  const waypoints: Position[] = [{ ...home }];
+  let goingRight = true;
+
+  for (let y = minY + 15; y < maxY - 15; y += spacing) {
+    // Find all intersection x-coordinates of the horizontal scanline at y with polygon segments
+    const intersections: number[] = [];
+    for (let i = 0; i < inner.length; i++) {
+      const p1 = inner[i];
+      const p2 = inner[(i + 1) % inner.length];
+      if ((p1.y <= y && p2.y > y) || (p2.y <= y && p1.y > y)) {
+        const x = p1.x + ((y - p1.y) / (p2.y - p1.y)) * (p2.x - p1.x);
+        intersections.push(x);
+      }
+    }
+
+    intersections.sort((a, b) => a - b);
+
+    // If we have at least 2 intersection bounds on this scanline
+    if (intersections.length >= 2) {
+      const minX = intersections[0] + 5;
+      const maxX = intersections[intersections.length - 1] - 5;
+      if (maxX > minX) {
+        if (goingRight) {
+          waypoints.push({ x: minX, y });
+          waypoints.push({ x: maxX, y });
+        } else {
+          waypoints.push({ x: maxX, y });
+          waypoints.push({ x: minX, y });
+        }
+        goingRight = !goingRight;
+      }
+    }
+  }
+
+  waypoints.push({ ...home }); // Return to base
+  return waypoints;
 }
 
 /** Calculate total route distance */

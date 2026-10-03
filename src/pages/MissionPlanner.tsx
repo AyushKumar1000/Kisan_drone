@@ -1,10 +1,10 @@
 import React from 'react';
-import { useSimulationStore } from '../state/simulationStore';
-import { Play, Pause, Square, RotateCcw, MapPin, Route, Ruler } from 'lucide-react';
+import { useSimulationStore, FIELD_PRESETS } from '../state/simulationStore';
+import { Play, Pause, Square, RotateCcw, MapPin, Route, Ruler, Layers, Sparkles, Shield } from 'lucide-react';
 import FieldMap from '../components/FieldMap';
-import { formatDuration } from '../utils/calculations';
+import { formatDuration, calculatePolygonArea, formatArea } from '../utils/calculations';
 
-const MissionPlanner: React.FC = () => {
+export const MissionPlanner: React.FC = () => {
   const drone = useSimulationStore(s => s.drone);
   const route = useSimulationStore(s => s.route);
   const fieldBoundary = useSimulationStore(s => s.fieldBoundary);
@@ -13,99 +13,170 @@ const MissionPlanner: React.FC = () => {
   const resumeMission = useSimulationStore(s => s.resumeMission);
   const stopMission = useSimulationStore(s => s.stopMission);
   const resetMission = useSimulationStore(s => s.resetMission);
+  const applyFieldPreset = useSimulationStore(s => s.applyFieldPreset);
 
   const waypointCount = route.waypoints.length;
   const completedWaypoints = Math.min(drone.currentWaypointIndex, waypointCount);
   const progressPct = waypointCount > 0 ? (completedWaypoints / waypointCount) * 100 : 0;
 
+  const areaInfo = formatArea(calculatePolygonArea(fieldBoundary.points));
+
+  // Estimated spray volume needed (assuming 15L per hectare)
+  const estLiters = (calculatePolygonArea(fieldBoundary.points) * 0.0001 * 15).toFixed(1);
+  const estFlightSeconds = drone.groundSpeed > 0 ? route.totalDistance / drone.groundSpeed : 0;
+
   return (
-    <div className="space-y-4 animate-fade-in">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Mission Planner</h2>
+    <div className="space-y-6 animate-fade-in">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+            <Route className="text-accent-cyan" size={22} />
+            Autonomous Route & Precision Coverage Planner
+          </h2>
+          <p className="text-xs text-gray-400 mt-1">
+            Serpentine swath planning constrained strictly within the farmer's traced geofence to prevent overspray into neighbouring lands.
+          </p>
+        </div>
         <div className="flex items-center gap-2">
           {!drone.missionActive ? (
-            <button onClick={startMission} className="btn-primary" aria-label="Start mission">
-              <Play size={16} /> Start Mission
+            <button onClick={startMission} className="btn-primary text-xs flex items-center gap-1.5" aria-label="Start mission">
+              <Play size={14} /> Start Spray Mission
             </button>
           ) : (
             <>
               {drone.missionPaused ? (
-                <button onClick={resumeMission} className="btn-primary" aria-label="Resume mission">
-                  <Play size={16} /> Resume
+                <button onClick={resumeMission} className="btn-primary text-xs flex items-center gap-1.5" aria-label="Resume mission">
+                  <Play size={14} /> Resume
                 </button>
               ) : (
-                <button onClick={pauseMission} className="btn-warning" aria-label="Pause mission">
-                  <Pause size={16} /> Pause
+                <button onClick={pauseMission} className="btn-warning text-xs flex items-center gap-1.5" aria-label="Pause mission">
+                  <Pause size={14} /> Pause
                 </button>
               )}
-              <button onClick={stopMission} className="btn-danger" aria-label="Stop mission">
-                <Square size={16} /> Stop
+              <button onClick={stopMission} className="btn-danger text-xs flex items-center gap-1.5" aria-label="Stop mission">
+                <Square size={14} /> Abort
               </button>
             </>
           )}
-          <button onClick={resetMission} className="btn-ghost" aria-label="Reset mission">
-            <RotateCcw size={16} /> Reset
+          <button onClick={resetMission} className="btn-secondary text-xs flex items-center gap-1.5" aria-label="Reset mission">
+            <RotateCcw size={14} /> Reset
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        {/* Map */}
-        <div className="xl:col-span-2">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+        {/* Map & Presets */}
+        <div className="xl:col-span-2 space-y-4">
           <FieldMap width={620} height={420} />
+
+          {/* Preset Farm Quick Select */}
+          <div className="panel p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                <Layers size={14} className="text-accent-blue" />
+                Quick Field Preset Geometry
+              </h3>
+              <span className="text-[11px] text-gray-400">Adaptive coverage recalculated automatically</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {Object.entries(FIELD_PRESETS).map(([key, preset]) => (
+                <button
+                  key={key}
+                  onClick={() => applyFieldPreset(key)}
+                  className="p-2.5 rounded-lg border bg-navy-900/60 border-navy-700 hover:border-accent-blue hover:text-white text-gray-300 text-left transition-colors"
+                >
+                  <div className="text-xs font-bold truncate">{preset.name.split('(')[0]}</div>
+                  <div className="text-[10px] text-gray-500 mt-0.5 truncate">{preset.points.length} corners</div>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
-        {/* Mission Info */}
+        {/* Mission Telemetry & Waypoints */}
         <div className="space-y-4">
           {/* Mission Status */}
-          <div className="card">
-            <h3 className="text-sm font-semibold text-gray-300 mb-3">Mission Status</h3>
-            <div className="space-y-3">
-              <InfoRow label="Status" value={drone.missionActive ? (drone.missionPaused ? 'PAUSED' : 'ACTIVE') : 'IDLE'} valueClass={drone.missionActive ? 'text-safe' : 'text-gray-500'} />
-              <InfoRow label="Flight State" value={drone.flightState} valueClass="text-accent-cyan" />
-              <InfoRow label="Route Progress" value={`${completedWaypoints} / ${waypointCount} waypoints`} />
+          <div className="panel p-4 space-y-3">
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Mission Execution Status</h3>
+            <div className="space-y-2.5 text-xs">
+              <div className="flex justify-between py-1 border-b border-navy-700">
+                <span className="text-gray-400">Mission State:</span>
+                <span className={`font-mono font-bold ${drone.missionActive ? 'text-safe' : 'text-gray-400'}`}>
+                  {drone.missionActive ? (drone.missionPaused ? 'PAUSED' : 'ACTIVE IN FLIGHT') : 'STANDBY IDLE'}
+                </span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-navy-700">
+                <span className="text-gray-400">Current Flight Mode:</span>
+                <span className="font-mono text-accent-cyan font-bold">{drone.flightState}</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-navy-700">
+                <span className="text-gray-400">Route Waypoints:</span>
+                <span className="font-mono text-white">{completedWaypoints} / {waypointCount} completed</span>
+              </div>
               <div>
-                <div className="flex justify-between text-xs text-gray-500 mb-1">
-                  <span>Progress</span>
-                  <span>{progressPct.toFixed(0)}%</span>
+                <div className="flex justify-between text-[11px] text-gray-400 mb-1">
+                  <span>Coverage Progress:</span>
+                  <span className="font-mono text-white">{progressPct.toFixed(0)}%</span>
                 </div>
-                <div className="h-2 bg-navy-700 rounded-full overflow-hidden">
-                  <div className="h-full bg-accent-blue rounded-full transition-all duration-500" style={{ width: `${progressPct}%` }} />
+                <div className="h-2 bg-navy-900 rounded-full overflow-hidden border border-navy-700">
+                  <div className="h-full bg-gradient-to-r from-accent-blue to-accent-cyan rounded-full transition-all duration-300" style={{ width: `${progressPct}%` }} />
                 </div>
               </div>
-              <InfoRow label="Distance Traveled" value={`${drone.distanceTraveled.toFixed(0)}m`} />
-              <InfoRow label="Total Route" value={`${route.totalDistance.toFixed(0)}m`} />
             </div>
           </div>
 
-          {/* Field Info */}
-          <div className="card">
-            <h3 className="text-sm font-semibold text-gray-300 mb-3">Field Configuration</h3>
-            <div className="space-y-3">
-              <InfoRow label="Boundary Points" value={`${fieldBoundary.points.length}`} />
-              <InfoRow label="Safety Margin" value={`${fieldBoundary.safetyMargin}m`} />
-              <InfoRow label="Home Position" value={`(${drone.homePosition.x}, ${drone.homePosition.y})`} />
+          {/* Field Plan Calculations */}
+          <div className="panel p-4 space-y-3">
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Traced Field Metrics</h3>
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between py-1 border-b border-navy-700">
+                <span className="text-gray-400">Traced Field Area:</span>
+                <span className="font-mono font-bold text-white">{areaInfo.acres} ({areaInfo.hectares})</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-navy-700">
+                <span className="text-gray-400">Total Swath Flight Path:</span>
+                <span className="font-mono text-accent-cyan font-bold">{route.totalDistance.toFixed(0)} meters</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-navy-700">
+                <span className="text-gray-400">Estimated Mission Duration:</span>
+                <span className="font-mono text-gray-200">{formatDuration(estFlightSeconds)} (@ {drone.groundSpeed || 5} m/s)</span>
+              </div>
+              <div className="flex justify-between py-1">
+                <span className="text-gray-400">Est. Agro-Chemical Volume:</span>
+                <span className="font-mono text-safe font-bold">{estLiters} Litres</span>
+              </div>
             </div>
           </div>
 
-          {/* Waypoints */}
-          <div className="card">
-            <h3 className="text-sm font-semibold text-gray-300 mb-3">
-              <Route size={14} className="inline mr-1" /> Route Waypoints
+          {/* Waypoint Coordinates */}
+          <div className="panel p-4 space-y-2">
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center justify-between">
+              <span>Swath Waypoint Sequence</span>
+              <span className="font-mono text-[10px] text-gray-500">{route.waypoints.length} Points</span>
             </h3>
-            <div className="max-h-48 overflow-y-auto space-y-1">
-              {route.waypoints.slice(0, 20).map((wp, i) => (
-                <div key={wp.id} className={`flex items-center gap-2 text-xs py-1 px-2 rounded ${i === drone.currentWaypointIndex ? 'bg-accent-blue/15 text-accent-blue' : i < drone.currentWaypointIndex ? 'text-gray-600' : 'text-gray-400'}`}>
-                  <MapPin size={10} />
-                  <span className="font-mono">WP{i}</span>
-                  <span>({wp.position.x.toFixed(0)}, {wp.position.y.toFixed(0)})</span>
-                  {i === 0 && <span className="badge-info text-[9px] py-0 px-1">HOME</span>}
-                  {i === drone.currentWaypointIndex && <span className="badge-safe text-[9px] py-0 px-1">CURRENT</span>}
+            <div className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px]">
+              {route.waypoints.map((wp, i) => (
+                <div
+                  key={wp.id}
+                  className={`flex items-center justify-between py-1 px-2 rounded ${
+                    i === drone.currentWaypointIndex
+                      ? 'bg-accent-blue/20 text-accent-cyan font-bold border border-accent-blue/30'
+                      : i < drone.currentWaypointIndex
+                      ? 'text-gray-500'
+                      : 'text-gray-300 hover:bg-navy-700/40'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <MapPin size={10} className={i === 0 ? 'text-warning' : 'text-accent-blue'} />
+                    <span>WP{i}</span>
+                    <span className="text-gray-500">({wp.position.x.toFixed(0)}, {wp.position.y.toFixed(0)})</span>
+                  </div>
+                  {i === 0 && <span className="text-[9px] px-1.5 py-0.2 rounded bg-warning/20 text-warning font-sans">BASE</span>}
+                  {i === drone.currentWaypointIndex && (
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-safe/20 text-safe font-sans">TARGET</span>
+                  )}
                 </div>
               ))}
-              {route.waypoints.length > 20 && (
-                <p className="text-xs text-gray-600 px-2">...and {route.waypoints.length - 20} more</p>
-              )}
             </div>
           </div>
         </div>
@@ -113,14 +184,5 @@ const MissionPlanner: React.FC = () => {
     </div>
   );
 };
-
-function InfoRow({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
-  return (
-    <div className="flex justify-between text-xs">
-      <span className="text-gray-500">{label}</span>
-      <span className={`font-mono font-medium ${valueClass || 'text-gray-300'}`}>{value}</span>
-    </div>
-  );
-}
 
 export default MissionPlanner;

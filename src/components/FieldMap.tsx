@@ -1,6 +1,6 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useRef } from 'react';
 import { useSimulationStore } from '../state/simulationStore';
-import { shrinkPolygon } from '../utils/calculations';
+import { shrinkPolygon, Position } from '../utils/calculations';
 
 interface FieldMapProps {
   width?: number;
@@ -9,6 +9,11 @@ interface FieldMapProps {
   showDrone?: boolean;
   showLabels?: boolean;
   compact?: boolean;
+  isTracing?: boolean;
+  tracedPoints?: Position[];
+  onMapClick?: (pos: Position) => void;
+  onVertexDrag?: (index: number, pos: Position) => void;
+  interactiveMoveDrone?: boolean;
 }
 
 const FieldMap: React.FC<FieldMapProps> = ({
@@ -18,31 +23,81 @@ const FieldMap: React.FC<FieldMapProps> = ({
   showDrone = true,
   showLabels = true,
   compact = false,
+  isTracing = false,
+  tracedPoints = [],
+  onMapClick,
+  interactiveMoveDrone = false,
 }) => {
   const drone = useSimulationStore(s => s.drone);
   const fieldBoundary = useSimulationStore(s => s.fieldBoundary);
   const route = useSimulationStore(s => s.route);
-  const settings = useSimulationStore(s => s.settings);
+  const setDronePosition = useSimulationStore(s => s.setDronePosition);
+
+  const [hoverPos, setHoverPos] = useState<Position | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+
+  const activePolygon = isTracing && tracedPoints.length >= 3 ? tracedPoints : fieldBoundary.points;
 
   const innerBoundary = useMemo(
-    () => shrinkPolygon(fieldBoundary.points, fieldBoundary.safetyMargin),
-    [fieldBoundary]
+    () => shrinkPolygon(activePolygon, fieldBoundary.safetyMargin),
+    [activePolygon, fieldBoundary.safetyMargin]
   );
 
-  const boundaryPath = fieldBoundary.points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') + 'Z';
-  const innerPath = innerBoundary.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') + 'Z';
+  const boundaryPath = activePolygon.length >= 3
+    ? activePolygon.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') + 'Z'
+    : '';
+
+  const innerPath = innerBoundary.length >= 3
+    ? innerBoundary.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') + 'Z'
+    : '';
 
   const routePath = route.waypoints.map((wp, i) => `${i === 0 ? 'M' : 'L'}${wp.position.x},${wp.position.y}`).join(' ');
 
   // Traveled path
   const traveledPath = route.waypoints.slice(0, drone.currentWaypointIndex).map((wp, i) => `${i === 0 ? 'M' : 'L'}${wp.position.x},${wp.position.y}`).join(' ');
 
-  const droneColor = drone.spray.active ? '#10b981' : drone.flightState === 'SAFE_MODE' ? '#f59e0b' : drone.flightState === 'EMERGENCY' ? '#ef4444' : '#3b82f6';
+  const droneColor = drone.spray.active
+    ? '#10b981'
+    : drone.flightState === 'SAFE_MODE'
+    ? '#f59e0b'
+    : drone.flightState === 'EMERGENCY'
+    ? '#ef4444'
+    : '#3b82f6';
+
+  const handleSvgClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * width);
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * height);
+    const pos = { x, y };
+
+    if (isTracing && onMapClick) {
+      onMapClick(pos);
+    } else if (interactiveMoveDrone && !drone.missionActive) {
+      setDronePosition(pos);
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current || !isTracing) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * width);
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * height);
+    setHoverPos({ x, y });
+  };
 
   return (
     <div className={`relative bg-navy-900 rounded-xl border border-navy-600 overflow-hidden ${compact ? '' : 'p-2'}`}>
-      {/* Grid pattern */}
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
+      <svg
+        ref={svgRef}
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        onClick={handleSvgClick}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setHoverPos(null)}
+        className={`w-full h-auto select-none ${isTracing ? 'cursor-crosshair' : interactiveMoveDrone ? 'cursor-pointer' : 'cursor-default'}`}
+      >
         <defs>
           <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a2234" strokeWidth="0.5" />
@@ -50,9 +105,14 @@ const FieldMap: React.FC<FieldMapProps> = ({
           <pattern id="gridSmall" width="10" height="10" patternUnits="userSpaceOnUse">
             <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#111827" strokeWidth="0.3" />
           </pattern>
+          {/* Hazard diagonal stripes for neighbouring farm outside */}
+          <pattern id="hazardStripes" width="20" height="20" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">
+            <line x1="0" y1="0" x2="0" y2="20" stroke="#ef444415" strokeWidth="10" />
+            <line x1="10" y1="0" x2="10" y2="20" stroke="#11182705" strokeWidth="10" />
+          </pattern>
           {/* Spray pattern */}
           <radialGradient id="sprayGlow">
-            <stop offset="0%" stopColor="#10b981" stopOpacity="0.4" />
+            <stop offset="0%" stopColor="#10b981" stopOpacity="0.45" />
             <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
           </radialGradient>
         </defs>
@@ -61,14 +121,43 @@ const FieldMap: React.FC<FieldMapProps> = ({
         <rect width={width} height={height} fill="url(#gridSmall)" />
         <rect width={width} height={height} fill="url(#grid)" />
 
-        {/* No-spray zone (between boundary and inner) */}
-        <path d={boundaryPath} fill="#ef444410" stroke="#ef4444" strokeWidth="2" strokeDasharray="8,4" />
+        {/* Neighboring Land / Off-Limit Hazard Overlay */}
+        <rect width={width} height={height} fill="url(#hazardStripes)" />
 
-        {/* Safe spray area */}
-        <path d={innerPath} fill="#10b98108" stroke="#10b981" strokeWidth="1.5" strokeDasharray="4,4" />
+        {/* Neighboring Land labels */}
+        {!compact && showLabels && (
+          <g opacity="0.6">
+            <rect x="20" y="15" width="220" height="22" rx="4" fill="#111827dd" stroke="#ef444450" />
+            <text x="30" y="30" fill="#ef4444" fontSize="9" fontWeight="bold">
+              🚫 NEIGHBOURING ORGANIC FARM (NO-SPRAY)
+            </text>
+          </g>
+        )}
 
-        {/* Route */}
-        {showRoute && (
+        {/* Farmer's Authorized Field Boundary (Polygon) */}
+        {boundaryPath && (
+          <path
+            d={boundaryPath}
+            fill="#0f172a"
+            stroke="#ef4444"
+            strokeWidth="2.5"
+            strokeDasharray={isTracing ? '5,5' : '8,4'}
+          />
+        )}
+
+        {/* Safe Inner Spray Area (Buffer offset) */}
+        {innerPath && !isTracing && (
+          <path
+            d={innerPath}
+            fill="#10b98110"
+            stroke="#10b981"
+            strokeWidth="1.5"
+            strokeDasharray="4,4"
+          />
+        )}
+
+        {/* Route (only when not in active tracing mode) */}
+        {showRoute && !isTracing && (
           <>
             <path d={routePath} fill="none" stroke="#3b82f640" strokeWidth="1.5" strokeDasharray="6,3" />
             {/* Traveled part */}
@@ -79,41 +168,111 @@ const FieldMap: React.FC<FieldMapProps> = ({
             {route.waypoints.map((wp, i) => (
               <g key={wp.id}>
                 <circle
-                  cx={wp.position.x} cy={wp.position.y} r={i === 0 ? 5 : 2.5}
+                  cx={wp.position.x}
+                  cy={wp.position.y}
+                  r={i === 0 ? 5 : 2.5}
                   fill={i === 0 ? '#f59e0b' : i <= drone.currentWaypointIndex ? '#3b82f6' : '#3b82f640'}
-                  stroke={i === 0 ? '#f59e0b80' : 'none'} strokeWidth="2"
+                  stroke={i === 0 ? '#f59e0b80' : 'none'}
+                  strokeWidth="2"
                 />
               </g>
             ))}
           </>
         )}
 
-        {/* Home marker */}
-        <g>
-          <circle cx={drone.homePosition.x} cy={drone.homePosition.y} r="8" fill="#f59e0b20" stroke="#f59e0b" strokeWidth="1.5" />
-          <text x={drone.homePosition.x} y={drone.homePosition.y + 3.5} textAnchor="middle" fill="#f59e0b" fontSize="8" fontWeight="bold">H</text>
-          {showLabels && (
-            <text x={drone.homePosition.x + 12} y={drone.homePosition.y + 3} fill="#f59e0b" fontSize="9" fontFamily="monospace">BASE</text>
-          )}
-        </g>
+        {/* Tracing in progress vertices & guide lines */}
+        {isTracing && (
+          <g>
+            {tracedPoints.length > 0 && (
+              <polyline
+                points={tracedPoints.map(p => `${p.x},${p.y}`).join(' ')}
+                fill="none"
+                stroke="#06b6d4"
+                strokeWidth="2.5"
+                strokeDasharray="4,4"
+              />
+            )}
 
-        {/* Drone */}
-        {showDrone && (
+            {/* Line to mouse cursor */}
+            {hoverPos && tracedPoints.length > 0 && (
+              <line
+                x1={tracedPoints[tracedPoints.length - 1].x}
+                y1={tracedPoints[tracedPoints.length - 1].y}
+                x2={hoverPos.x}
+                y2={hoverPos.y}
+                stroke="#06b6d480"
+                strokeWidth="2"
+                strokeDasharray="3,3"
+              />
+            )}
+
+            {/* Traced vertex markers */}
+            {tracedPoints.map((p, idx) => (
+              <g key={idx} transform={`translate(${p.x},${p.y})`}>
+                <circle
+                  r={idx === 0 ? 8 : 6}
+                  fill={idx === 0 ? '#10b981' : '#06b6d4'}
+                  stroke="#ffffff"
+                  strokeWidth="2"
+                  className="animate-pulse"
+                />
+                <text
+                  y="3"
+                  textAnchor="middle"
+                  fill="#ffffff"
+                  fontSize="8"
+                  fontWeight="bold"
+                >
+                  {idx + 1}
+                </text>
+              </g>
+            ))}
+          </g>
+        )}
+
+        {/* Existing Boundary Vertices Pins */}
+        {!isTracing &&
+          fieldBoundary.points.map((p, idx) => (
+            <g key={idx} transform={`translate(${p.x},${p.y})`}>
+              <circle r="4" fill="#ef4444" stroke="#ffffff" strokeWidth="1.5" />
+              {showLabels && (
+                <text x="7" y="3" fill="#9ca3af" fontSize="8" fontFamily="monospace">
+                  P{idx + 1}
+                </text>
+              )}
+            </g>
+          ))}
+
+        {/* Home Base marker */}
+        {!isTracing && (
+          <g>
+            <circle cx={drone.homePosition.x} cy={drone.homePosition.y} r="9" fill="#f59e0b20" stroke="#f59e0b" strokeWidth="1.8" />
+            <text x={drone.homePosition.x} y={drone.homePosition.y + 3.5} textAnchor="middle" fill="#f59e0b" fontSize="9" fontWeight="bold">H</text>
+            {showLabels && (
+              <text x={drone.homePosition.x + 13} y={drone.homePosition.y + 3} fill="#f59e0b" fontSize="9" fontFamily="monospace" fontWeight="bold">
+                FARM BASE
+              </text>
+            )}
+          </g>
+        )}
+
+        {/* Drone Icon */}
+        {showDrone && !isTracing && (
           <g transform={`translate(${drone.position.x},${drone.position.y})`}>
             {/* Spray radius */}
             {drone.spray.active && (
-              <circle r="20" fill="url(#sprayGlow)" className="pulse-dot" />
+              <circle r="22" fill="url(#sprayGlow)" className="pulse-dot" />
             )}
 
             {/* Drone body */}
             <g transform={`rotate(${drone.heading})`}>
-              {/* Direction indicator */}
-              <line x1="0" y1="0" x2="14" y2="0" stroke={droneColor} strokeWidth="2" />
-              {/* Drone circle */}
-              <circle r="7" fill={droneColor} stroke="white" strokeWidth="1.5" />
-              {/* Cross arms */}
-              <line x1="-5" y1="-5" x2="5" y2="5" stroke="white" strokeWidth="1" opacity="0.5" />
-              <line x1="5" y1="-5" x2="-5" y2="5" stroke="white" strokeWidth="1" opacity="0.5" />
+              {/* Direction heading pointer */}
+              <line x1="0" y1="0" x2="16" y2="0" stroke={droneColor} strokeWidth="2.5" />
+              {/* Central hub */}
+              <circle r="8" fill={droneColor} stroke="white" strokeWidth="2" />
+              {/* Rotor arms */}
+              <line x1="-6" y1="-6" x2="6" y2="6" stroke="white" strokeWidth="1.2" opacity="0.7" />
+              <line x1="6" y1="-6" x2="-6" y2="6" stroke="white" strokeWidth="1.2" opacity="0.7" />
             </g>
 
             {/* State label */}
@@ -126,19 +285,19 @@ const FieldMap: React.FC<FieldMapProps> = ({
         )}
 
         {/* Legend */}
-        {showLabels && !compact && (
-          <g transform={`translate(${width - 160}, 20)`}>
-            <rect x="-5" y="-5" width="155" height="80" rx="6" fill="#0a0f1ecc" stroke="#243049" />
+        {showLabels && !compact && !isTracing && (
+          <g transform={`translate(${width - 170}, 20)`}>
+            <rect x="-5" y="-5" width="165" height="90" rx="6" fill="#0a0f1edd" stroke="#243049" />
             <line x1="0" y1="8" x2="15" y2="8" stroke="#ef4444" strokeWidth="2" strokeDasharray="4,2" />
-            <text x="20" y="11" fill="#9ca3af" fontSize="9">Field Boundary</text>
+            <text x="20" y="11" fill="#9ca3af" fontSize="9">Traced Field Boundary</text>
             <line x1="0" y1="24" x2="15" y2="24" stroke="#10b981" strokeWidth="1.5" strokeDasharray="3,3" />
-            <text x="20" y="27" fill="#9ca3af" fontSize="9">Safe Spray Area</text>
+            <text x="20" y="27" fill="#9ca3af" fontSize="9">30m Safe Spray Zone</text>
             <line x1="0" y1="40" x2="15" y2="40" stroke="#3b82f6" strokeWidth="1.5" />
-            <text x="20" y="43" fill="#9ca3af" fontSize="9">Flight Route</text>
-            <circle cx="7" cy="55" r="4" fill="#f59e0b" />
-            <text x="20" y="58" fill="#9ca3af" fontSize="9">Home / Base</text>
-            <circle cx="7" cy="68" r="4" fill="#3b82f6" />
-            <text x="20" y="71" fill="#9ca3af" fontSize="9">Drone</text>
+            <text x="20" y="43" fill="#9ca3af" fontSize="9">Serpentine Route</text>
+            <circle cx="7" cy="56" r="4" fill="#f59e0b" />
+            <text x="20" y="59" fill="#9ca3af" fontSize="9">Farmer Base Station</text>
+            <circle cx="7" cy="71" r="4" fill="#3b82f6" />
+            <text x="20" y="74" fill="#9ca3af" fontSize="9">KisanDrone Position</text>
           </g>
         )}
       </svg>
